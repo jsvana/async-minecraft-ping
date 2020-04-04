@@ -1,7 +1,7 @@
 use anyhow::Result;
 use structopt::StructOpt;
 
-use minecraft::Server;
+use async_minecraft_ping::Server;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example")]

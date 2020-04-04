@@ -1,6 +1,6 @@
-# minecraft
+# async-minecraft-ping
 
-A [ServerListPing](https://wiki.vg/Server_List_Ping) client implementation in Rust.
+An async [ServerListPing](https://wiki.vg/Server_List_Ping) client implementation in Rust.
 
 ## Usage
 
