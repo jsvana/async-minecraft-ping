@@ -1,8 +1,31 @@
-use anyhow::{format_err, Result};
+//! This module defines a wrapper around Minecraft's
+//! [ServerListPing](https://wiki.vg/Server_List_Ping)
+
 use serde::Deserialize;
+use thiserror::Error;
 use tokio::net::TcpStream;
 
 use crate::protocol::{self, AsyncReadRawPacket, AsyncWriteRawPacket};
+
+#[derive(Error, Debug)]
+pub enum ServerError {
+    #[error("error reading or writing data")]
+    ProtocolError,
+
+    #[error("failed to connect to server")]
+    FailedToConnect,
+
+    #[error("invalid JSON response: \"{0}\"")]
+    InvalidJson(String),
+}
+
+impl From<protocol::ProtocolError> for ServerError {
+    fn from(_err: protocol::ProtocolError) -> Self {
+        ServerError::ProtocolError
+    }
+}
+
+type Result<T> = std::result::Result<T, ServerError>;
 
 #[derive(Debug, Deserialize)]
 pub struct ServerVersion {
@@ -28,8 +51,11 @@ pub struct ServerDescription {
     pub text: String,
 }
 
+/// StatusResponse is the decoded JSON
+/// response from a status query over
+/// ServerListPing.
 #[derive(Debug, Deserialize)]
-pub struct ServerInfo {
+pub struct StatusResponse {
     pub version: ServerVersion,
     pub players: ServerPlayers,
     pub description: ServerDescription,
@@ -39,6 +65,8 @@ pub struct ServerInfo {
 const LATEST_PROTOCOL_VERSION: usize = 578;
 const DEFAULT_PORT: u16 = 25565;
 
+/// Server is a wrapper around a Minecraft
+/// ServerListPing connection.
 pub struct Server {
     current_packet_id: usize,
     protocol_version: usize,
@@ -47,7 +75,8 @@ pub struct Server {
 }
 
 impl Server {
-    // Builders
+    /// build initiates the Minecraft server
+    /// connection build process.
     pub fn build(address: String) -> Self {
         Server {
             current_packet_id: 0,
@@ -57,19 +86,27 @@ impl Server {
         }
     }
 
+    /// with_protocol_version sets a specific
+    /// protocol version for the connection to
+    /// use. If not specified, the latest version
+    /// will be used.
     pub fn with_protocol_version(mut self, protocol_version: usize) -> Self {
         self.protocol_version = protocol_version;
         self
     }
 
+    /// with_port sets a specific port for the
+    /// connection to use. If not specified, the
+    /// default port of 25565 will be used.
     pub fn with_port(mut self, port: u16) -> Self {
         self.port = port;
         self
     }
 
-    // Connection methods
-    pub async fn status(&mut self) -> Result<ServerInfo> {
-        let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port)).await?;
+    /// status sends and reads the packets for the
+    /// ServerListPing status call.
+    pub async fn status(&mut self) -> Result<StatusResponse> {
+        let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port)).await.map_err(|_| ServerError::FailedToConnect)?;
 
         let handshake = protocol::HandshakePacket {
             packet_id: self.current_packet_id,
@@ -93,6 +130,6 @@ impl Server {
         self.current_packet_id += 1;
 
         serde_json::from_str(&response.body)
-            .map_err(|_| format_err!("Failed to parse JSON response"))
+            .map_err(|_| ServerError::InvalidJson(response.body))
     }
 }

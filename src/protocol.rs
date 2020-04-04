@@ -1,9 +1,46 @@
+//! This module defines various methods to read and
+//! write packets in Minecraft's
+//! [ServerListPing](https://wiki.vg/Server_List_Ping)
+//! protocol.
+
 use std::io::Cursor;
 
-use anyhow::{bail, format_err, Result};
 use async_trait::async_trait;
+use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
+#[derive(Error, Debug)]
+pub enum ProtocolError {
+    #[error("error reading or writing data")]
+    IoError,
+
+    #[error("invalid varint data")]
+    InvalidVarInt,
+
+    #[error("invalid packet (expected ID {expected:?}, actual ID {actual:?})")]
+    InvalidPacketId {
+        expected: usize,
+        actual: usize,
+    },
+
+    #[error("invalid ServerListPing response body (invalid UTF-8)")]
+    InvalidResponseBody,
+}
+
+impl From<std::io::Error> for ProtocolError {
+    fn from(_err: std::io::Error) -> Self {
+        ProtocolError::IoError
+    }
+}
+
+type Result<T> = std::result::Result<T, ProtocolError>;
+
+/// State represents the desired next state of the
+/// exchange.
+///
+/// It's a bit silly now as there's only
+/// one entry, but technically there is more than
+/// one type that can be sent here.
 #[derive(Clone, Copy)]
 pub enum State {
     Status,
@@ -17,6 +54,15 @@ impl From<State> for usize {
     }
 }
 
+/// RawPacket is the underlying wrapper of data that
+/// gets read from and written to the socket.
+///
+/// Typically, the flow looks like this:
+/// 1. Construct a specific packet (HandshakePacket
+///   for example).
+/// 2. Write that packet's contents to a byte buffer.
+/// 3. Construct a RawPacket using that byte buffer.
+/// 4. Write the RawPacket to the socket.
 struct RawPacket {
     id: usize,
     data: Box<[u8]>,
@@ -28,14 +74,16 @@ impl RawPacket {
     }
 }
 
+/// AsyncWireReadExt adds varint and varint-backed
+/// string support to things that implement AsyncRead.
 #[async_trait]
-pub trait AsyncWireRead {
+pub trait AsyncWireReadExt {
     async fn read_varint(&mut self) -> Result<usize>;
     async fn read_string(&mut self) -> Result<String>;
 }
 
 #[async_trait]
-impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireRead for R {
+impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
     async fn read_varint(&mut self) -> Result<usize> {
         let mut read = 0;
         let mut result = 0;
@@ -45,7 +93,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireRead for R {
             result |= (value as usize) << (7 * read);
             read += 1;
             if read > 5 {
-                return Err(format_err!("Invalid data"));
+                return Err(ProtocolError::InvalidVarInt);
             }
             if (read_value & 0b1000_0000) == 0 {
                 return Ok(result);
@@ -59,52 +107,20 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireRead for R {
         let mut buffer = vec![0; length];
         self.read_exact(&mut buffer).await?;
 
-        String::from_utf8(buffer).map_err(|_| format_err!("Non-UTF-8 data"))
+        String::from_utf8(buffer).map_err(|_| ProtocolError::InvalidResponseBody)
     }
 }
 
+/// AsyncWireWriteExt adds varint and varint-backed
+/// string support to things that implement AsyncWrite.
 #[async_trait]
-pub trait AsyncReadRawPacket {
-    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
-        &mut self,
-        expected_packet_id: usize,
-    ) -> Result<T>;
-}
-
-#[async_trait]
-impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
-    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
-        &mut self,
-        expected_packet_id: usize,
-    ) -> Result<T> {
-        let length = self.read_varint().await? as usize;
-        let packet_id = self.read_varint().await?;
-
-        if packet_id != expected_packet_id {
-            bail!(
-                "Unexpected packet ID (expected {}, got {})",
-                expected_packet_id,
-                packet_id
-            );
-        }
-
-        let mut buffer = vec![0; length - 1];
-        self.read_exact(&mut buffer).await?;
-
-        //Ok(RawPacket::new(packet_id, buffer.into_boxed_slice()))
-        T::read_from_buffer(packet_id, buffer).await
-    }
-}
-
-#[async_trait]
-pub trait AsyncWireWrite {
+pub trait AsyncWireWriteExt {
     async fn write_varint(&mut self, int: usize) -> Result<()>;
     async fn write_string(&mut self, string: &str) -> Result<()>;
-    async fn write_u16_big_endian(&mut self, value: u16) -> Result<()>;
 }
 
 #[async_trait]
-impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWrite for W {
+impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWriteExt for W {
     async fn write_varint(&mut self, int: usize) -> Result<()> {
         let mut int = (int as u64) & 0xFFFF_FFFF;
         let mut written = 0;
@@ -133,15 +149,69 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWrite for W {
 
         Ok(())
     }
+}
 
-    async fn write_u16_big_endian(&mut self, value: u16) -> Result<()> {
-        let u16_buffer = [(value >> 8) as u8, (value & 0xFF) as u8];
-        self.write_all(&u16_buffer).await?;
+/// PacketId is used to allow AsyncWriteRawPacket
+/// to generically get a packet's ID.
+pub trait PacketId {
+    fn get_packet_id(&self) -> usize;
+}
 
-        Ok(())
+/// AsyncReadFromBuffer is used to allow
+/// AsyncReadRawPacket to generically read a
+/// packet's specific data from a buffer.
+#[async_trait]
+pub trait AsyncReadFromBuffer: Sized {
+    async fn read_from_buffer(packet_id: usize, buffer: Vec<u8>) -> Result<Self>;
+}
+
+/// AsyncWriteToBuffer is used to allow
+/// AsyncWriteRawPacket to generically write a
+/// packet's specific data into a buffer.
+#[async_trait]
+pub trait AsyncWriteToBuffer {
+    async fn write_to_buffer(&self) -> Result<Vec<u8>>;
+}
+
+/// AsyncReadRawPacket is the core piece of
+/// the read side of the protocol. It allows
+/// the user to construct a specific packet
+/// from something that implements AsyncRead.
+#[async_trait]
+pub trait AsyncReadRawPacket {
+    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
+        &mut self,
+        expected_packet_id: usize,
+    ) -> Result<T>;
+}
+
+#[async_trait]
+impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
+    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
+        &mut self,
+        expected_packet_id: usize,
+    ) -> Result<T> {
+        let length = self.read_varint().await? as usize;
+        let packet_id = self.read_varint().await?;
+
+        if packet_id != expected_packet_id {
+            return Err(ProtocolError::InvalidPacketId {
+                expected: expected_packet_id,
+                actual: packet_id,
+            });
+        }
+
+        let mut buffer = vec![0; length - 1];
+        self.read_exact(&mut buffer).await?;
+
+        T::read_from_buffer(packet_id, buffer).await
     }
 }
 
+/// AsyncWriteRawPacket is the core piece of
+/// the write side of the protocol. It allows
+/// the user to write a specific packet to
+/// something that implements AsyncWrite.
 #[async_trait]
 pub trait AsyncWriteRawPacket {
     async fn write_packet<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
@@ -172,20 +242,9 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
     }
 }
 
-pub trait PacketId {
-    fn get_packet_id(&self) -> usize;
-}
-
-#[async_trait]
-pub trait AsyncWriteToBuffer {
-    async fn write_to_buffer(&self) -> Result<Vec<u8>>;
-}
-
-#[async_trait]
-pub trait AsyncReadFromBuffer: Sized {
-    async fn read_from_buffer(packet_id: usize, buffer: Vec<u8>) -> Result<Self>;
-}
-
+/// HandshakePacket is the first of two packets
+/// to be sent during a status check for
+/// ServerListPing.
 pub struct HandshakePacket {
     pub packet_id: usize,
     pub protocol_version: usize,
@@ -214,6 +273,9 @@ impl PacketId for HandshakePacket {
     }
 }
 
+/// RequestPacket is the second of two packets
+/// to be sent during a status check for
+/// ServerListPing.
 pub struct RequestPacket {
     pub packet_id: usize,
 }
@@ -231,6 +293,9 @@ impl PacketId for RequestPacket {
     }
 }
 
+/// ResponsePacket is the response from the
+/// server to a status check for
+/// ServerListPing.
 pub struct ResponsePacket {
     pub packet_id: usize,
     pub body: String,
