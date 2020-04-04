@@ -106,7 +106,9 @@ impl Server {
     /// status sends and reads the packets for the
     /// ServerListPing status call.
     pub async fn status(&mut self) -> Result<StatusResponse> {
-        let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port)).await.map_err(|_| ServerError::FailedToConnect)?;
+        let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
+            .await
+            .map_err(|_| ServerError::FailedToConnect)?;
 
         let handshake = protocol::HandshakePacket {
             packet_id: self.current_packet_id,
@@ -129,7 +131,6 @@ impl Server {
         // Increment the current packet ID once we've successfully read from the server
         self.current_packet_id += 1;
 
-        serde_json::from_str(&response.body)
-            .map_err(|_| ServerError::InvalidJson(response.body))
+        serde_json::from_str(&response.body).map_err(|_| ServerError::InvalidJson(response.body))
     }
 }

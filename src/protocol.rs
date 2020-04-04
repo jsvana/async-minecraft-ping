@@ -18,10 +18,7 @@ pub enum ProtocolError {
     InvalidVarInt,
 
     #[error("invalid packet (expected ID {expected:?}, actual ID {actual:?})")]
-    InvalidPacketId {
-        expected: usize,
-        actual: usize,
-    },
+    InvalidPacketId { expected: usize, actual: usize },
 
     #[error("invalid ServerListPing response body (invalid UTF-8)")]
     InvalidResponseBody,
