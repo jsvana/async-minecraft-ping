@@ -1,6 +1,6 @@
 # async-minecraft-ping
 
-![crates.io](https://img.shields.io/crates/v/async-minecraft-ping/0.1.0)
+![crates.io](https://img.shields.io/crates/v/async-minecraft-ping)
 ![docs.rs](https://docs.rs/async-minecraft-ping/badge.svg?version=0.1.0)
 ![crates.io](https://img.shields.io/crates/l/async-minecraft-ping/0.1.0)
 
@@ -16,8 +16,8 @@ let mut server = Server::build("some.cool.server".to_string());
 let status = server.status().await?;
 
 println!(
-		"{} of {} player(s) online",
-		status.players.online, status.players.max
+    "{} of {} player(s) online",
+    status.players.online, status.players.max
 );
 ```
 
