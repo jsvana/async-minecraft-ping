@@ -1,10 +1,9 @@
 [package]
-name = "mc-ping"
+name = "minecraft"
 version = "0.1.0"
-authors = ["Jay Vana <jsvana@mtu.edu>"]
+authors = ["Jay Vana <jaysvana@gmail.com>"]
 edition = "2018"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+license = "MIT OR Apache-2.0"
 
 [dependencies]
 anyhow = "1.0"
@@ -13,4 +12,9 @@ byteorder = "1.3"
 integer-encoding = "1.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-tokio = { version = "0.2", features = ["full"] }
+tokio = { version = "0.2", features = ["net", "io-util"] }
+
+[dev-dependencies]
+anyhow = "1.0"
+structopt = "0.3"
+tokio = { version = "0.2", features = ["macros"] }

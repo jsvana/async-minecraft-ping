@@ -2,7 +2,7 @@ use anyhow::{format_err, Result};
 use serde::Deserialize;
 use tokio::net::TcpStream;
 
-use crate::minecraft::packets::{self, AsyncReadRawPacket, AsyncWriteRawPacket};
+use crate::protocol::{self, AsyncReadRawPacket, AsyncWriteRawPacket};
 
 #[derive(Debug, Deserialize)]
 pub struct ServerVersion {
@@ -20,7 +20,7 @@ pub struct ServerPlayer {
 pub struct ServerPlayers {
     pub max: u32,
     pub online: u32,
-    pub sample: Vec<ServerPlayer>,
+    pub sample: Option<Vec<ServerPlayer>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -71,23 +71,23 @@ impl Server {
     pub async fn status(&mut self) -> Result<ServerInfo> {
         let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port)).await?;
 
-        let handshake = packets::HandshakePacket {
+        let handshake = protocol::HandshakePacket {
             packet_id: self.current_packet_id,
             protocol_version: self.protocol_version,
             server_address: self.address.to_string(),
             server_port: self.port,
-            next_state: packets::State::Status,
+            next_state: protocol::State::Status,
         };
 
         stream.write_packet(handshake).await?;
 
         stream
-            .write_packet(packets::RequestPacket {
+            .write_packet(protocol::RequestPacket {
                 packet_id: self.current_packet_id,
             })
             .await?;
 
-        let response: packets::ResponsePacket = stream.read_packet(self.current_packet_id).await?;
+        let response: protocol::ResponsePacket = stream.read_packet(self.current_packet_id).await?;
 
         // Increment the current packet ID once we've successfully read from the server
         self.current_packet_id += 1;

@@ -39,16 +39,15 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireRead for R {
     async fn read_varint(&mut self) -> Result<usize> {
         let mut read = 0;
         let mut result = 0;
-        let mut buffer = [0];
         loop {
-            self.read_exact(&mut buffer).await?;
-            let value = buffer[0] & 0b0111_1111;
+            let read_value = self.read_u8().await?;
+            let value = read_value & 0b0111_1111;
             result |= (value as usize) << (7 * read);
             read += 1;
             if read > 5 {
                 return Err(format_err!("Invalid data"));
             }
-            if (buffer[0] & 0b1000_0000) == 0 {
+            if (read_value & 0b1000_0000) == 0 {
                 return Ok(result);
             }
         }
@@ -202,7 +201,7 @@ impl AsyncWriteToBuffer for HandshakePacket {
 
         buffer.write_varint(self.protocol_version).await?;
         buffer.write_string(&self.server_address).await?;
-        buffer.write_u16_big_endian(self.server_port).await?;
+        buffer.write_u16(self.server_port).await?;
         buffer.write_varint(self.next_state.into()).await?;
 
         Ok(buffer.into_inner())
