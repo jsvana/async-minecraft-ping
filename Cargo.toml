@@ -4,6 +4,11 @@ version = "0.1.0"
 authors = ["Jay Vana <jaysvana@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
+description = "An async Rust client for the Minecraft ServerListPing protocol"
+readme = "README.md"
+repository = "https://github.com/jsvana/async-minecraft-ping/"
+keywords = ["minecraft", "mc", "serverlistping"]
+categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
 anyhow = "1.0"
