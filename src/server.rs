@@ -1,6 +1,7 @@
 //! This module defines a wrapper around Minecraft's
 //! [ServerListPing](https://wiki.vg/Server_List_Ping)
 
+use anyhow::{Context, Result};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -24,8 +25,6 @@ impl From<protocol::ProtocolError> for ServerError {
         ServerError::ProtocolError
     }
 }
-
-type Result<T> = std::result::Result<T, ServerError>;
 
 /// Contains information about the server version.
 #[derive(Debug, Deserialize)]
@@ -90,28 +89,26 @@ pub struct StatusResponse {
 const LATEST_PROTOCOL_VERSION: usize = 578;
 const DEFAULT_PORT: u16 = 25565;
 
-/// Server is a wrapper around a Minecraft
+/// Builder for a Minecraft
 /// ServerListPing connection.
-pub struct Server {
-    current_packet_id: usize,
+pub struct ConnectionConfig {
     protocol_version: usize,
     address: String,
     port: u16,
 }
 
-impl Server {
-    /// build initiates the Minecraft server
+impl ConnectionConfig {
+    /// Initiates the Minecraft server
     /// connection build process.
     pub fn build(address: String) -> Self {
-        Server {
-            current_packet_id: 0,
+        ConnectionConfig {
             protocol_version: LATEST_PROTOCOL_VERSION,
             address,
             port: DEFAULT_PORT,
         }
     }
 
-    /// with_protocol_version sets a specific
+    /// Sets a specific
     /// protocol version for the connection to
     /// use. If not specified, the latest version
     /// will be used.
@@ -120,7 +117,7 @@ impl Server {
         self
     }
 
-    /// with_port sets a specific port for the
+    /// Sets a specific port for the
     /// connection to use. If not specified, the
     /// default port of 25565 will be used.
     pub fn with_port(mut self, port: u16) -> Self {
@@ -128,34 +125,63 @@ impl Server {
         self
     }
 
-    /// status sends and reads the packets for the
-    /// ServerListPing status call.
-    pub async fn status(&mut self) -> Result<StatusResponse> {
-        let mut stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
+    /// Connects to the server and consumes the builder.
+    pub async fn connect(self) -> Result<StatusConnection> {
+        let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
             .await
             .map_err(|_| ServerError::FailedToConnect)?;
 
-        let handshake = protocol::HandshakePacket {
-            packet_id: self.current_packet_id,
+        Ok(StatusConnection {
+            stream,
             protocol_version: self.protocol_version,
-            server_address: self.address.to_string(),
-            server_port: self.port,
-            next_state: protocol::State::Status,
-        };
+            address: self.address,
+            port: self.port,
+        })
+    }
+}
 
-        stream.write_packet(handshake).await?;
+/// Convenience wrapper for easily connecting
+/// to a server on the default port with
+/// the latest protocol version.
+pub async fn connect(address: String) -> Result<StatusConnection> {
+    ConnectionConfig::build(address).connect().await
+}
 
-        stream
-            .write_packet(protocol::RequestPacket {
-                packet_id: self.current_packet_id,
-            })
-            .await?;
+/// Wraps a built
+pub struct StatusConnection {
+    stream: TcpStream,
+    protocol_version: usize,
+    address: String,
+    port: u16,
+}
 
-        let response: protocol::ResponsePacket = stream.read_packet(self.current_packet_id).await?;
+impl StatusConnection {
+    /// Sends and reads the packets for the
+    /// ServerListPing status call.
+    pub async fn status(&mut self) -> Result<StatusResponse> {
+        let handshake = protocol::HandshakePacket::new(
+            self.protocol_version,
+            self.address.to_string(),
+            self.port,
+        );
 
-        // Increment the current packet ID once we've successfully read from the server
-        self.current_packet_id += 1;
+        self.stream
+            .write_packet(handshake)
+            .await
+            .context("failed to write handshake packet")?;
 
-        serde_json::from_str(&response.body).map_err(|_| ServerError::InvalidJson(response.body))
+        self.stream
+            .write_packet(protocol::RequestPacket::new())
+            .await
+            .context("failed to write request packet")?;
+
+        let response: protocol::ResponsePacket = self
+            .stream
+            .read_packet()
+            .await
+            .context("failed to read response packet")?;
+
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| ServerError::InvalidJson(response.body))?)
     }
 }

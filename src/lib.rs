@@ -1,3 +1,3 @@
 mod protocol;
 mod server;
-pub use server::{Server, StatusResponse};
+pub use server::{connect, ConnectionConfig, StatusResponse};

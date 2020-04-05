@@ -11,9 +11,14 @@ An async [ServerListPing](https://wiki.vg/Server_List_Ping) client implementatio
 See [the example](./examples/status.rs).
 
 ```rust
-let mut server = Server::build("some.cool.server".to_string());
+let mut config = ConnectionConfig::build(args.address);
+if let Some(port) = args.port {
+    config = config.with_port(port);
+}
 
-let status = server.status().await?;
+let mut connection = config.connect().await?;
+
+let status = connection.status().await?;
 
 println!(
     "{} of {} player(s) online",

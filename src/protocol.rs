@@ -5,6 +5,7 @@
 
 use std::io::Cursor;
 
+use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -29,8 +30,6 @@ impl From<std::io::Error> for ProtocolError {
         ProtocolError::IoError
     }
 }
-
-type Result<T> = std::result::Result<T, ProtocolError>;
 
 /// State represents the desired next state of the
 /// exchange.
@@ -90,7 +89,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
             result |= (value as usize) << (7 * read);
             read += 1;
             if read > 5 {
-                return Err(ProtocolError::InvalidVarInt);
+                bail!(ProtocolError::InvalidVarInt);
             }
             if (read_value & 0b1000_0000) == 0 {
                 return Ok(result);
@@ -104,7 +103,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
         let mut buffer = vec![0; length];
         self.read_exact(&mut buffer).await?;
 
-        String::from_utf8(buffer).map_err(|_| ProtocolError::InvalidResponseBody)
+        Ok(String::from_utf8(buffer).map_err(|_| ProtocolError::InvalidResponseBody)?)
     }
 }
 
@@ -154,12 +153,18 @@ pub trait PacketId {
     fn get_packet_id(&self) -> usize;
 }
 
+/// ExpectedPacketId is used to allow AsyncReadRawPacket
+/// to generically get a packet's expected ID.
+pub trait ExpectedPacketId {
+    fn get_expected_packet_id() -> usize;
+}
+
 /// AsyncReadFromBuffer is used to allow
 /// AsyncReadRawPacket to generically read a
 /// packet's specific data from a buffer.
 #[async_trait]
 pub trait AsyncReadFromBuffer: Sized {
-    async fn read_from_buffer(packet_id: usize, buffer: Vec<u8>) -> Result<Self>;
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self>;
 }
 
 /// AsyncWriteToBuffer is used to allow
@@ -176,32 +181,40 @@ pub trait AsyncWriteToBuffer {
 /// from something that implements AsyncRead.
 #[async_trait]
 pub trait AsyncReadRawPacket {
-    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
+    async fn read_packet<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
-        expected_packet_id: usize,
     ) -> Result<T>;
 }
 
 #[async_trait]
 impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
-    async fn read_packet<T: AsyncReadFromBuffer + Send + Sync>(
+    async fn read_packet<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
-        expected_packet_id: usize,
     ) -> Result<T> {
-        let length = self.read_varint().await? as usize;
-        let packet_id = self.read_varint().await?;
+        let length = self
+            .read_varint()
+            .await
+            .context("failed to read packet length")?;
+        let packet_id = self
+            .read_varint()
+            .await
+            .context("failed to read packet ID")?;
+
+        let expected_packet_id = T::get_expected_packet_id();
 
         if packet_id != expected_packet_id {
-            return Err(ProtocolError::InvalidPacketId {
+            bail!(ProtocolError::InvalidPacketId {
                 expected: expected_packet_id,
                 actual: packet_id,
             });
         }
 
         let mut buffer = vec![0; length - 1];
-        self.read_exact(&mut buffer).await?;
+        self.read_exact(&mut buffer)
+            .await
+            .context("failed to read packet body")?;
 
-        T::read_from_buffer(packet_id, buffer).await
+        T::read_from_buffer(buffer).await
     }
 }
 
@@ -229,12 +242,22 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
 
         let mut buffer: Cursor<Vec<u8>> = Cursor::new(Vec::new());
 
-        buffer.write_varint(raw_packet.id).await?;
-        buffer.write_all(&raw_packet.data).await?;
+        buffer
+            .write_varint(raw_packet.id)
+            .await
+            .context("failed to write packet ID")?;
+        buffer
+            .write_all(&raw_packet.data)
+            .await
+            .context("failed to write packet data")?;
 
         let mut inner = buffer.into_inner();
-        self.write_varint(inner.len()).await?;
-        self.write(&mut inner).await?;
+        self.write_varint(inner.len())
+            .await
+            .context("failed to write packet length")?;
+        self.write(&mut inner)
+            .await
+            .context("failed to write constructed packet buffer")?;
         Ok(())
     }
 }
@@ -250,15 +273,39 @@ pub struct HandshakePacket {
     pub next_state: State,
 }
 
+impl HandshakePacket {
+    pub fn new(protocol_version: usize, server_address: String, server_port: u16) -> Self {
+        Self {
+            packet_id: 0,
+            protocol_version,
+            server_address,
+            server_port,
+            next_state: State::Status,
+        }
+    }
+}
+
 #[async_trait]
 impl AsyncWriteToBuffer for HandshakePacket {
     async fn write_to_buffer(&self) -> Result<Vec<u8>> {
         let mut buffer = Cursor::new(Vec::<u8>::new());
 
-        buffer.write_varint(self.protocol_version).await?;
-        buffer.write_string(&self.server_address).await?;
-        buffer.write_u16(self.server_port).await?;
-        buffer.write_varint(self.next_state.into()).await?;
+        buffer
+            .write_varint(self.protocol_version)
+            .await
+            .context("failed to write protocol version")?;
+        buffer
+            .write_string(&self.server_address)
+            .await
+            .context("failed to write server address")?;
+        buffer
+            .write_u16(self.server_port)
+            .await
+            .context("failed to write server port")?;
+        buffer
+            .write_varint(self.next_state.into())
+            .await
+            .context("failed to write next state")?;
 
         Ok(buffer.into_inner())
     }
@@ -275,6 +322,12 @@ impl PacketId for HandshakePacket {
 /// ServerListPing.
 pub struct RequestPacket {
     pub packet_id: usize,
+}
+
+impl RequestPacket {
+    pub fn new() -> Self {
+        Self { packet_id: 0 }
+    }
 }
 
 #[async_trait]
@@ -298,13 +351,22 @@ pub struct ResponsePacket {
     pub body: String,
 }
 
+impl ExpectedPacketId for ResponsePacket {
+    fn get_expected_packet_id() -> usize {
+        0
+    }
+}
+
 #[async_trait]
 impl AsyncReadFromBuffer for ResponsePacket {
-    async fn read_from_buffer(packet_id: usize, buffer: Vec<u8>) -> Result<Self> {
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self> {
         let mut reader = Cursor::new(buffer);
 
-        let body = reader.read_string().await?;
+        let body = reader
+            .read_string()
+            .await
+            .context("failed to read response body")?;
 
-        Ok(ResponsePacket { packet_id, body })
+        Ok(ResponsePacket { packet_id: 0, body })
     }
 }

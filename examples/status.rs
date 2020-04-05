@@ -1,7 +1,7 @@
 use anyhow::Result;
 use structopt::StructOpt;
 
-use async_minecraft_ping::Server;
+use async_minecraft_ping::ConnectionConfig;
 
 #[derive(Debug, StructOpt)]
 #[structopt(name = "example")]
@@ -19,12 +19,14 @@ struct Args {
 async fn main() -> Result<()> {
     let args = Args::from_args();
 
-    let mut server = Server::build(args.address);
+    let mut config = ConnectionConfig::build(args.address);
     if let Some(port) = args.port {
-        server = server.with_port(port);
+        config = config.with_port(port);
     }
 
-    let status = server.status().await?;
+    let mut connection = config.connect().await?;
+
+    let status = connection.status().await?;
 
     println!(
         "{} of {} player(s) online",
