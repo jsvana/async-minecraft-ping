@@ -27,38 +27,63 @@ impl From<protocol::ProtocolError> for ServerError {
 
 type Result<T> = std::result::Result<T, ServerError>;
 
+/// Contains information about the server version.
 #[derive(Debug, Deserialize)]
 pub struct ServerVersion {
+    /// The server's Minecraft version, i.e. "1.15.2".
     pub name: String,
+
+    /// The server's ServerListPing protocol version.
     pub protocol: u32,
 }
 
+/// Contains information about a player.
 #[derive(Debug, Deserialize)]
 pub struct ServerPlayer {
+    /// The player's in-game name.
     pub name: String,
+
+    /// The player's UUID.
     pub id: String,
 }
 
+/// Contains information about the currently online
+/// players.
 #[derive(Debug, Deserialize)]
 pub struct ServerPlayers {
+    /// The configured maximum number of players for the
+    /// server.
     pub max: u32,
+
+    /// The number of players currently online.
     pub online: u32,
+
+    /// An optional list of player information for
+    /// currently online players.
     pub sample: Option<Vec<ServerPlayer>>,
 }
 
+/// Contains the server's MOTD.
 #[derive(Debug, Deserialize)]
 pub struct ServerDescription {
     pub text: String,
 }
 
-/// StatusResponse is the decoded JSON
-/// response from a status query over
+/// The decoded JSON response from a status query over
 /// ServerListPing.
 #[derive(Debug, Deserialize)]
 pub struct StatusResponse {
+    /// Information about the server's version.
     pub version: ServerVersion,
+
+    /// Information about currently online players.
     pub players: ServerPlayers,
+
+    /// Single-field struct containing the server's MOTD.
     pub description: ServerDescription,
+
+    /// Optional field containing a path to the server's
+    /// favicon.
     pub favicon: Option<String>,
 }
 
