@@ -147,7 +147,7 @@ pub async fn connect(address: String) -> Result<StatusConnection> {
     ConnectionConfig::build(address).connect().await
 }
 
-/// Wraps a built
+/// Wraps a built connection
 pub struct StatusConnection {
     stream: TcpStream,
     protocol_version: usize,
