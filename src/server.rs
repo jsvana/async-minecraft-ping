@@ -64,8 +64,10 @@ pub struct ServerPlayers {
 
 /// Contains the server's MOTD.
 #[derive(Debug, Deserialize)]
-pub struct ServerDescription {
-    pub text: String,
+#[serde(untagged)]
+pub enum ServerDescription {
+    Plain(String),
+    Object{text: String},
 }
 
 /// The decoded JSON response from a status query over
@@ -180,8 +182,16 @@ impl StatusConnection {
             .read_packet()
             .await
             .context("failed to read response packet")?;
-
-        Ok(serde_json::from_str(&response.body)
-            .map_err(|_| ServerError::InvalidJson(response.body))?)
+        let res = serde_json::from_str::<StatusResponse>(&response.body);
+        match res {
+            Ok(s) => Ok(s),
+            Err(e) => {
+                println!("{}",e);
+                Err(ServerError::InvalidJson(response.body).into())
+            }
+            
+        }
+        // Ok(
+        //     .map_err(|_| ServerError::InvalidJson(response.body))?)
     }
 }
