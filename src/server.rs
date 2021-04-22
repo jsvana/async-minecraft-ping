@@ -64,8 +64,10 @@ pub struct ServerPlayers {
 
 /// Contains the server's MOTD.
 #[derive(Debug, Deserialize)]
-pub struct ServerDescription {
-    pub text: String,
+#[serde(untagged)]
+pub enum ServerDescription {
+    Plain(String),
+    Object{text: String},
 }
 
 /// The decoded JSON response from a status query over
