@@ -182,16 +182,8 @@ impl StatusConnection {
             .read_packet()
             .await
             .context("failed to read response packet")?;
-        let res = serde_json::from_str::<StatusResponse>(&response.body);
-        match res {
-            Ok(s) => Ok(s),
-            Err(e) => {
-                println!("{}",e);
-                Err(ServerError::InvalidJson(response.body).into())
-            }
-            
-        }
-        // Ok(
-        //     .map_err(|_| ServerError::InvalidJson(response.body))?)
+
+        Ok(serde_json::from_str(&response.body)
+            .map_err(|_| ServerError::InvalidJson(response.body))?)
     }
 }
