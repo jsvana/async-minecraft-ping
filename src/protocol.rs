@@ -134,7 +134,7 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWriteExt for W {
                 break;
             }
         }
-        self.write(&mut buffer[0..written]).await?;
+        self.write(&buffer[0..written]).await?;
 
         Ok(())
     }
@@ -251,11 +251,11 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
             .await
             .context("failed to write packet data")?;
 
-        let mut inner = buffer.into_inner();
+        let inner = buffer.into_inner();
         self.write_varint(inner.len())
             .await
             .context("failed to write packet length")?;
-        self.write(&mut inner)
+        self.write(&inner)
             .await
             .context("failed to write constructed packet buffer")?;
         Ok(())
