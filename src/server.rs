@@ -67,7 +67,7 @@ pub struct ServerPlayers {
 #[serde(untagged)]
 pub enum ServerDescription {
     Plain(String),
-    Object{text: String},
+    Object { text: String },
 }
 
 /// The decoded JSON response from a status query over
@@ -102,10 +102,10 @@ pub struct ConnectionConfig {
 impl ConnectionConfig {
     /// Initiates the Minecraft server
     /// connection build process.
-    pub fn build(address: String) -> Self {
+    pub fn build<T: Into<String>>(address: T) -> Self {
         ConnectionConfig {
             protocol_version: LATEST_PROTOCOL_VERSION,
-            address,
+            address: address.into(),
             port: DEFAULT_PORT,
         }
     }
