@@ -1,6 +1,6 @@
 [package]
 name = "async-minecraft-ping"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Jay Vana <jaysvana@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -31,7 +31,7 @@ structopt = "0.3"
 [dev-dependencies.tokio]
 version = "^1.6"
 features = [
-    "macros", 
+    "macros",
     "rt-multi-thread",
     "net",
     "io-util"
