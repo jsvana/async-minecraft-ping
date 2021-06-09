@@ -1,29 +1,53 @@
 //! This module defines a wrapper around Minecraft's
 //! [ServerListPing](https://wiki.vg/Server_List_Ping)
 
-use anyhow::{Context, Result};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::TcpStream;
 
 use crate::protocol::{self, AsyncReadRawPacket, AsyncWriteRawPacket};
 
+pub type Result<T> = std::result::Result<T, ServerError>;
+
 #[derive(Error, Debug)]
 pub enum ServerError {
+    #[error(transparent)]
+    Generic(#[from] ServerErrorKind),
+    #[error("{}: {}",context, source)]
+    WithContext {
+        context: &'static str,
+        #[source]
+        source: ServerErrorKind
+    }
+}
+
+impl ServerError {
+    fn with_context<T: Into<ServerErrorKind>>(e: T, context: &'static str) -> Self {
+        let v: ServerErrorKind = e.into();
+        v.context(context)
+    }
+}
+
+impl ServerErrorKind {
+    /// Wrap ProtocolErrorKind into ProtocolError with context
+    fn context(self, context: &'static str) -> ServerError {
+        ServerError::WithContext {
+            source: self,
+            context,
+        }
+    }
+}
+
+#[derive(Error, Debug)]
+pub enum ServerErrorKind {
     #[error("error reading or writing data")]
-    ProtocolError,
+    ProtocolError(#[from] protocol::ProtocolError),
 
     #[error("failed to connect to server")]
     FailedToConnect,
 
     #[error("invalid JSON response: \"{0}\"")]
     InvalidJson(String),
-}
-
-impl From<protocol::ProtocolError> for ServerError {
-    fn from(_err: protocol::ProtocolError) -> Self {
-        ServerError::ProtocolError
-    }
 }
 
 /// Contains information about the server version.
@@ -131,7 +155,7 @@ impl ConnectionConfig {
     pub async fn connect(self) -> Result<StatusConnection> {
         let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
             .await
-            .map_err(|_| ServerError::FailedToConnect)?;
+            .map_err(|_| ServerErrorKind::FailedToConnect)?;
 
         Ok(StatusConnection {
             stream,
@@ -170,20 +194,20 @@ impl StatusConnection {
         self.stream
             .write_packet(handshake)
             .await
-            .context("failed to write handshake packet")?;
+            .map_err(|e|ServerError::with_context(e, "failed to write handshake packet"))?;
 
         self.stream
             .write_packet(protocol::RequestPacket::new())
             .await
-            .context("failed to write request packet")?;
+            .map_err(|e|ServerError::with_context(e, "failed to write request packet"))?;
 
         let response: protocol::ResponsePacket = self
             .stream
             .read_packet()
             .await
-            .context("failed to read response packet")?;
+            .map_err(|e|ServerError::with_context(e, "failed to read response packet"))?;
 
         Ok(serde_json::from_str(&response.body)
-            .map_err(|_| ServerError::InvalidJson(response.body))?)
+            .map_err(|_| ServerErrorKind::InvalidJson(response.body))?)
     }
 }
