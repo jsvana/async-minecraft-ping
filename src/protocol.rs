@@ -195,6 +195,11 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
             .read_varint()
             .await
             .context("failed to read packet length")?;
+
+        if length == 0 {
+            bail!("packet length is invalid");
+        }
+
         let packet_id = self
             .read_varint()
             .await
