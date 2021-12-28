@@ -376,9 +376,6 @@ impl AsyncReadFromBuffer for ResponsePacket {
     }
 }
 
-// 26 is maybe from server after invalid sent packet?
-// TODO: ping and pong packets
-
 pub struct PingPacket {
     pub packet_id: usize,
     pub payload: u64,
