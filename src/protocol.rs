@@ -375,3 +375,68 @@ impl AsyncReadFromBuffer for ResponsePacket {
         Ok(ResponsePacket { packet_id: 0, body })
     }
 }
+
+// 26 is maybe from server after invalid sent packet?
+// TODO: ping and pong packets
+
+pub struct PingPacket {
+    pub packet_id: usize,
+    pub payload: u64,
+}
+
+impl PingPacket {
+    pub fn new(payload: u64) -> Self {
+        Self {
+            packet_id: 1,
+            payload,
+        }
+    }
+}
+
+#[async_trait]
+impl AsyncWriteToBuffer for PingPacket {
+    async fn write_to_buffer(&self) -> Result<Vec<u8>> {
+        let mut buffer = Cursor::new(Vec::<u8>::new());
+
+        buffer
+            .write_u64(self.payload)
+            .await
+            .context("failed to write payload")?;
+
+        Ok(buffer.into_inner())
+    }
+}
+
+impl PacketId for PingPacket {
+    fn get_packet_id(&self) -> usize {
+        self.packet_id
+    }
+}
+
+pub struct PongPacket {
+    pub packet_id: usize,
+    pub payload: u64,
+}
+
+impl ExpectedPacketId for PongPacket {
+    fn get_expected_packet_id() -> usize {
+        1
+    }
+}
+
+#[async_trait]
+impl AsyncReadFromBuffer for PongPacket {
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self> {
+        let mut reader = Cursor::new(buffer);
+
+        let payload = reader
+            .read_u64()
+            .await
+            .context("failed to read response payload")?;
+
+        Ok(PongPacket {
+            packet_id: 0,
+            payload,
+        })
+    }
+}
