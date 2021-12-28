@@ -6,7 +6,6 @@
 use std::io::Cursor;
 use std::time::Duration;
 
-use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
@@ -14,7 +13,10 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 #[derive(Error, Debug)]
 pub enum ProtocolError {
     #[error("error reading or writing data")]
-    IoError,
+    Io(#[from] std::io::Error),
+
+    #[error("invalid packet length")]
+    InvalidPacketLength,
 
     #[error("invalid varint data")]
     InvalidVarInt,
@@ -27,12 +29,6 @@ pub enum ProtocolError {
 
     #[error("connection timed out")]
     Timeout(#[from] tokio::time::error::Elapsed),
-}
-
-impl From<std::io::Error> for ProtocolError {
-    fn from(_err: std::io::Error) -> Self {
-        ProtocolError::IoError
-    }
 }
 
 /// State represents the desired next state of the
@@ -78,13 +74,13 @@ impl RawPacket {
 /// string support to things that implement AsyncRead.
 #[async_trait]
 pub trait AsyncWireReadExt {
-    async fn read_varint(&mut self) -> Result<usize>;
-    async fn read_string(&mut self) -> Result<String>;
+    async fn read_varint(&mut self) -> Result<usize, ProtocolError>;
+    async fn read_string(&mut self) -> Result<String, ProtocolError>;
 }
 
 #[async_trait]
 impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
-    async fn read_varint(&mut self) -> Result<usize> {
+    async fn read_varint(&mut self) -> Result<usize, ProtocolError> {
         let mut read = 0;
         let mut result = 0;
         loop {
@@ -93,7 +89,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
             result |= (value as usize) << (7 * read);
             read += 1;
             if read > 5 {
-                bail!(ProtocolError::InvalidVarInt);
+                return Err(ProtocolError::InvalidVarInt);
             }
             if (read_value & 0b1000_0000) == 0 {
                 return Ok(result);
@@ -101,7 +97,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
         }
     }
 
-    async fn read_string(&mut self) -> Result<String> {
+    async fn read_string(&mut self) -> Result<String, ProtocolError> {
         let length = self.read_varint().await?;
 
         let mut buffer = vec![0; length];
@@ -115,13 +111,13 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncWireReadExt for R {
 /// string support to things that implement AsyncWrite.
 #[async_trait]
 pub trait AsyncWireWriteExt {
-    async fn write_varint(&mut self, int: usize) -> Result<()>;
-    async fn write_string(&mut self, string: &str) -> Result<()>;
+    async fn write_varint(&mut self, int: usize) -> Result<(), ProtocolError>;
+    async fn write_string(&mut self, string: &str) -> Result<(), ProtocolError>;
 }
 
 #[async_trait]
 impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWriteExt for W {
-    async fn write_varint(&mut self, int: usize) -> Result<()> {
+    async fn write_varint(&mut self, int: usize) -> Result<(), ProtocolError> {
         let mut int = (int as u64) & 0xFFFF_FFFF;
         let mut written = 0;
         let mut buffer = [0; 5];
@@ -143,7 +139,7 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWriteExt for W {
         Ok(())
     }
 
-    async fn write_string(&mut self, string: &str) -> Result<()> {
+    async fn write_string(&mut self, string: &str) -> Result<(), ProtocolError> {
         self.write_varint(string.len()).await?;
         self.write_all(string.as_bytes()).await?;
 
@@ -168,7 +164,7 @@ pub trait ExpectedPacketId {
 /// packet's specific data from a buffer.
 #[async_trait]
 pub trait AsyncReadFromBuffer: Sized {
-    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self>;
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self, ProtocolError>;
 }
 
 /// AsyncWriteToBuffer is used to allow
@@ -176,7 +172,7 @@ pub trait AsyncReadFromBuffer: Sized {
 /// packet's specific data into a buffer.
 #[async_trait]
 pub trait AsyncWriteToBuffer {
-    async fn write_to_buffer(&self) -> Result<Vec<u8>>;
+    async fn write_to_buffer(&self) -> Result<Vec<u8>, ProtocolError>;
 }
 
 /// AsyncReadRawPacket is the core piece of
@@ -187,46 +183,38 @@ pub trait AsyncWriteToBuffer {
 pub trait AsyncReadRawPacket {
     async fn read_packet<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
-    ) -> Result<T>;
+    ) -> Result<T, ProtocolError>;
 
     async fn read_packet_with_timeout<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
         timeout: Duration,
-    ) -> Result<T>;
+    ) -> Result<T, ProtocolError>;
 }
 
 #[async_trait]
 impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
     async fn read_packet<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
-    ) -> Result<T> {
-        let length = self
-            .read_varint()
-            .await
-            .context("failed to read packet length")?;
+    ) -> Result<T, ProtocolError> {
+        let length = self.read_varint().await?;
 
         if length == 0 {
-            bail!("packet length is invalid");
+            return Err(ProtocolError::InvalidPacketLength);
         }
 
-        let packet_id = self
-            .read_varint()
-            .await
-            .context("failed to read packet ID")?;
+        let packet_id = self.read_varint().await?;
 
         let expected_packet_id = T::get_expected_packet_id();
 
         if packet_id != expected_packet_id {
-            bail!(ProtocolError::InvalidPacketId {
+            return Err(ProtocolError::InvalidPacketId {
                 expected: expected_packet_id,
                 actual: packet_id,
             });
         }
 
         let mut buffer = vec![0; length - 1];
-        self.read_exact(&mut buffer)
-            .await
-            .context("failed to read packet body")?;
+        self.read_exact(&mut buffer).await?;
 
         T::read_from_buffer(buffer).await
     }
@@ -234,7 +222,7 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
     async fn read_packet_with_timeout<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
         timeout: Duration,
-    ) -> Result<T> {
+    ) -> Result<T, ProtocolError> {
         tokio::time::timeout(timeout, self.read_packet()).await?
     }
 }
@@ -248,13 +236,13 @@ pub trait AsyncWriteRawPacket {
     async fn write_packet<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
         &mut self,
         packet: T,
-    ) -> Result<()>;
+    ) -> Result<(), ProtocolError>;
 
     async fn write_packet_with_timeout<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
         &mut self,
         packet: T,
         timeout: Duration,
-    ) -> Result<()>;
+    ) -> Result<(), ProtocolError>;
 }
 
 #[async_trait]
@@ -262,29 +250,19 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
     async fn write_packet<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
         &mut self,
         packet: T,
-    ) -> Result<()> {
+    ) -> Result<(), ProtocolError> {
         let packet_buffer = packet.write_to_buffer().await?;
 
         let raw_packet = RawPacket::new(packet.get_packet_id(), packet_buffer.into_boxed_slice());
 
         let mut buffer: Cursor<Vec<u8>> = Cursor::new(Vec::new());
 
-        buffer
-            .write_varint(raw_packet.id)
-            .await
-            .context("failed to write packet ID")?;
-        buffer
-            .write_all(&raw_packet.data)
-            .await
-            .context("failed to write packet data")?;
+        buffer.write_varint(raw_packet.id).await?;
+        buffer.write_all(&raw_packet.data).await?;
 
         let inner = buffer.into_inner();
-        self.write_varint(inner.len())
-            .await
-            .context("failed to write packet length")?;
-        self.write(&inner)
-            .await
-            .context("failed to write constructed packet buffer")?;
+        self.write_varint(inner.len()).await?;
+        self.write(&inner).await?;
         Ok(())
     }
 
@@ -292,7 +270,7 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
         &mut self,
         packet: T,
         timeout: Duration,
-    ) -> Result<()> {
+    ) -> Result<(), ProtocolError> {
         tokio::time::timeout(timeout, self.write_packet(packet)).await?
     }
 }
@@ -322,25 +300,13 @@ impl HandshakePacket {
 
 #[async_trait]
 impl AsyncWriteToBuffer for HandshakePacket {
-    async fn write_to_buffer(&self) -> Result<Vec<u8>> {
+    async fn write_to_buffer(&self) -> Result<Vec<u8>, ProtocolError> {
         let mut buffer = Cursor::new(Vec::<u8>::new());
 
-        buffer
-            .write_varint(self.protocol_version)
-            .await
-            .context("failed to write protocol version")?;
-        buffer
-            .write_string(&self.server_address)
-            .await
-            .context("failed to write server address")?;
-        buffer
-            .write_u16(self.server_port)
-            .await
-            .context("failed to write server port")?;
-        buffer
-            .write_varint(self.next_state.into())
-            .await
-            .context("failed to write next state")?;
+        buffer.write_varint(self.protocol_version).await?;
+        buffer.write_string(&self.server_address).await?;
+        buffer.write_u16(self.server_port).await?;
+        buffer.write_varint(self.next_state.into()).await?;
 
         Ok(buffer.into_inner())
     }
@@ -367,7 +333,7 @@ impl RequestPacket {
 
 #[async_trait]
 impl AsyncWriteToBuffer for RequestPacket {
-    async fn write_to_buffer(&self) -> Result<Vec<u8>> {
+    async fn write_to_buffer(&self) -> Result<Vec<u8>, ProtocolError> {
         Ok(Vec::new())
     }
 }
@@ -394,13 +360,10 @@ impl ExpectedPacketId for ResponsePacket {
 
 #[async_trait]
 impl AsyncReadFromBuffer for ResponsePacket {
-    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self> {
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self, ProtocolError> {
         let mut reader = Cursor::new(buffer);
 
-        let body = reader
-            .read_string()
-            .await
-            .context("failed to read response body")?;
+        let body = reader.read_string().await?;
 
         Ok(ResponsePacket { packet_id: 0, body })
     }
@@ -422,13 +385,10 @@ impl PingPacket {
 
 #[async_trait]
 impl AsyncWriteToBuffer for PingPacket {
-    async fn write_to_buffer(&self) -> Result<Vec<u8>> {
+    async fn write_to_buffer(&self) -> Result<Vec<u8>, ProtocolError> {
         let mut buffer = Cursor::new(Vec::<u8>::new());
 
-        buffer
-            .write_u64(self.payload)
-            .await
-            .context("failed to write payload")?;
+        buffer.write_u64(self.payload).await?;
 
         Ok(buffer.into_inner())
     }
@@ -453,13 +413,10 @@ impl ExpectedPacketId for PongPacket {
 
 #[async_trait]
 impl AsyncReadFromBuffer for PongPacket {
-    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self> {
+    async fn read_from_buffer(buffer: Vec<u8>) -> Result<Self, ProtocolError> {
         let mut reader = Cursor::new(buffer);
 
-        let payload = reader
-            .read_u64()
-            .await
-            .context("failed to read response payload")?;
+        let payload = reader.read_u64().await?;
 
         Ok(PongPacket {
             packet_id: 0,

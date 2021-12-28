@@ -1,6 +1,6 @@
 [package]
 name = "async-minecraft-ping"
-version = "0.6.0"
+version = "0.7.0"
 authors = ["Jay Vana <jaysvana@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -11,7 +11,6 @@ keywords = ["minecraft", "mc", "serverlistping"]
 categories = ["asynchronous", "api-bindings"]
 
 [dependencies]
-anyhow = "1.0"
 async-trait = "0.1"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

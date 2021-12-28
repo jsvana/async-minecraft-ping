@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use anyhow::{Context, Result};
 use serde::Deserialize;
 use thiserror::Error;
 use tokio::net::TcpStream;
@@ -144,7 +143,7 @@ impl ConnectionConfig {
     }
 
     /// Connects to the server and consumes the builder.
-    pub async fn connect(self) -> Result<StatusConnection> {
+    pub async fn connect(self) -> Result<StatusConnection, ServerError> {
         let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
             .await
             .map_err(|_| ServerError::FailedToConnect)?;
@@ -162,7 +161,7 @@ impl ConnectionConfig {
 /// Convenience wrapper for easily connecting
 /// to a server on the default port with
 /// the latest protocol version.
-pub async fn connect(address: String) -> Result<StatusConnection> {
+pub async fn connect(address: String) -> Result<StatusConnection, ServerError> {
     ConnectionConfig::build(address).connect().await
 }
 
@@ -183,7 +182,7 @@ impl StatusConnection {
     /// that can only issue pings. The resulting
     /// status body is accessible via the `status`
     /// property on `PingConnection`.
-    pub async fn status(mut self) -> Result<PingConnection> {
+    pub async fn status(mut self) -> Result<PingConnection, ServerError> {
         let handshake = protocol::HandshakePacket::new(
             self.protocol_version,
             self.address.to_string(),
@@ -192,19 +191,16 @@ impl StatusConnection {
 
         self.stream
             .write_packet_with_timeout(handshake, self.timeout.clone())
-            .await
-            .context("failed to write handshake packet")?;
+            .await?;
 
         self.stream
             .write_packet_with_timeout(protocol::RequestPacket::new(), self.timeout.clone())
-            .await
-            .context("failed to write request packet")?;
+            .await?;
 
         let response: protocol::ResponsePacket = self
             .stream
             .read_packet_with_timeout(self.timeout.clone())
-            .await
-            .context("failed to read response packet")?;
+            .await?;
 
         let status: StatusResponse = serde_json::from_str(&response.body)
             .map_err(|_| ServerError::InvalidJson(response.body))?;
@@ -240,19 +236,17 @@ impl PingConnection {
     ///
     /// Server closes the connection after a ping call,
     /// so this method consumes the connection.
-    pub async fn ping(mut self, payload: u64) -> Result<()> {
+    pub async fn ping(mut self, payload: u64) -> Result<(), ServerError> {
         let ping = protocol::PingPacket::new(payload);
 
         self.stream
             .write_packet_with_timeout(ping, self.timeout.clone())
-            .await
-            .context("failed to write ping packet")?;
+            .await?;
 
         let pong: protocol::PongPacket = self
             .stream
             .read_packet_with_timeout(self.timeout.clone())
-            .await
-            .context("failed to read pong packet")?;
+            .await?;
 
         if pong.payload != payload {
             return Err(ServerError::MismatchedPayload {
