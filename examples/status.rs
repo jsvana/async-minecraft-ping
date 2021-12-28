@@ -24,14 +24,16 @@ async fn main() -> Result<()> {
         config = config.with_port(port);
     }
 
-    let mut connection = config.connect().await?;
+    let connection = config.connect().await?;
 
-    let status = connection.status().await?;
+    let connection = connection.status().await?;
 
     println!(
         "{} of {} player(s) online",
-        status.players.online, status.players.max
+        connection.status.players.online, connection.status.players.max
     );
+
+    connection.ping(42).await?;
 
     Ok(())
 }

@@ -18,6 +18,9 @@ pub enum ServerError {
 
     #[error("invalid JSON response: \"{0}\"")]
     InvalidJson(String),
+
+    #[error("mismatched pong payload (expected \"{expected}\", got \"{actual}\")")]
+    MismatchedPayload { expected: u64, actual: u64 },
 }
 
 impl From<protocol::ProtocolError> for ServerError {
@@ -160,7 +163,12 @@ pub struct StatusConnection {
 impl StatusConnection {
     /// Sends and reads the packets for the
     /// ServerListPing status call.
-    pub async fn status(&mut self) -> Result<StatusResponse> {
+    ///
+    /// Consumes the connection and returns a type
+    /// that can only issue pings. The resulting
+    /// status body is accessible via the `status`
+    /// property on `PingConnection`.
+    pub async fn status(mut self) -> Result<PingConnection> {
         let handshake = protocol::HandshakePacket::new(
             self.protocol_version,
             self.address.to_string(),
@@ -183,7 +191,60 @@ impl StatusConnection {
             .await
             .context("failed to read response packet")?;
 
-        Ok(serde_json::from_str(&response.body)
-            .map_err(|_| ServerError::InvalidJson(response.body))?)
+        let status: StatusResponse = serde_json::from_str(&response.body)
+            .map_err(|_| ServerError::InvalidJson(response.body))?;
+
+        Ok(PingConnection {
+            stream: self.stream,
+            protocol_version: self.protocol_version,
+            address: self.address,
+            port: self.port,
+            status,
+        })
+    }
+}
+
+/// Wraps a built connection
+///
+/// Constructed by calling `status()` on
+/// a `StatusConnection` struct.
+pub struct PingConnection {
+    stream: TcpStream,
+    protocol_version: usize,
+    address: String,
+    port: u16,
+    pub status: StatusResponse,
+}
+
+impl PingConnection {
+    /// Sends a ping to the Minecraft server with the
+    /// provided payload and asserts that the returned
+    /// payload is the same.
+    ///
+    /// Server closes the connection after a ping call,
+    /// so this method consumes the connection.
+    pub async fn ping(mut self, payload: u64) -> Result<()> {
+        let ping = protocol::PingPacket::new(payload);
+
+        self.stream
+            .write_packet(ping)
+            .await
+            .context("failed to write ping packet")?;
+
+        let pong: protocol::PongPacket = self
+            .stream
+            .read_packet()
+            .await
+            .context("failed to read pong packet")?;
+
+        if pong.payload != payload {
+            return Err(ServerError::MismatchedPayload {
+                expected: payload,
+                actual: pong.payload,
+            }
+            .into());
+        }
+
+        Ok(())
     }
 }
