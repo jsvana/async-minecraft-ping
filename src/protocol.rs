@@ -4,6 +4,7 @@
 //! protocol.
 
 use std::io::Cursor;
+use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
 use async_trait::async_trait;
@@ -23,6 +24,9 @@ pub enum ProtocolError {
 
     #[error("invalid ServerListPing response body (invalid UTF-8)")]
     InvalidResponseBody,
+
+    #[error("connection timed out")]
+    Timeout(#[from] tokio::time::error::Elapsed),
 }
 
 impl From<std::io::Error> for ProtocolError {
@@ -184,6 +188,11 @@ pub trait AsyncReadRawPacket {
     async fn read_packet<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
         &mut self,
     ) -> Result<T>;
+
+    async fn read_packet_with_timeout<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<T>;
 }
 
 #[async_trait]
@@ -221,6 +230,13 @@ impl<R: AsyncRead + Unpin + Send + Sync> AsyncReadRawPacket for R {
 
         T::read_from_buffer(buffer).await
     }
+
+    async fn read_packet_with_timeout<T: ExpectedPacketId + AsyncReadFromBuffer + Send + Sync>(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<T> {
+        tokio::time::timeout(timeout, self.read_packet()).await?
+    }
 }
 
 /// AsyncWriteRawPacket is the core piece of
@@ -232,6 +248,12 @@ pub trait AsyncWriteRawPacket {
     async fn write_packet<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
         &mut self,
         packet: T,
+    ) -> Result<()>;
+
+    async fn write_packet_with_timeout<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
+        &mut self,
+        packet: T,
+        timeout: Duration,
     ) -> Result<()>;
 }
 
@@ -264,6 +286,14 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
             .await
             .context("failed to write constructed packet buffer")?;
         Ok(())
+    }
+
+    async fn write_packet_with_timeout<T: PacketId + AsyncWriteToBuffer + Send + Sync>(
+        &mut self,
+        packet: T,
+        timeout: Duration,
+    ) -> Result<()> {
+        tokio::time::timeout(timeout, self.write_packet(packet)).await?
     }
 }
 
