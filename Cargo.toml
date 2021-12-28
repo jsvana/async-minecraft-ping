@@ -1,6 +1,6 @@
 [package]
 name = "async-minecraft-ping"
-version = "0.5.0"
+version = "0.6.0"
 authors = ["Jay Vana <jaysvana@gmail.com>"]
 edition = "2018"
 license = "MIT OR Apache-2.0"
@@ -20,8 +20,9 @@ thiserror = "1.0"
 [dependencies.tokio]
 version = "^1.6"
 features = [
+    "io-util",
     "net",
-    "io-util"
+    "time"
 ]
 
 [dev-dependencies]

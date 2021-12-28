@@ -1,6 +1,8 @@
 //! This module defines a wrapper around Minecraft's
 //! [ServerListPing](https://wiki.vg/Server_List_Ping)
 
+use std::time::Duration;
+
 use anyhow::{Context, Result};
 use serde::Deserialize;
 use thiserror::Error;
@@ -93,6 +95,7 @@ pub struct StatusResponse {
 
 const LATEST_PROTOCOL_VERSION: usize = 578;
 const DEFAULT_PORT: u16 = 25565;
+const DEFAULT_TIMEOUT: Duration = Duration::from_secs(2);
 
 /// Builder for a Minecraft
 /// ServerListPing connection.
@@ -100,6 +103,7 @@ pub struct ConnectionConfig {
     protocol_version: usize,
     address: String,
     port: u16,
+    timeout: Duration,
 }
 
 impl ConnectionConfig {
@@ -110,6 +114,7 @@ impl ConnectionConfig {
             protocol_version: LATEST_PROTOCOL_VERSION,
             address: address.into(),
             port: DEFAULT_PORT,
+            timeout: DEFAULT_TIMEOUT,
         }
     }
 
@@ -130,6 +135,14 @@ impl ConnectionConfig {
         self
     }
 
+    /// Sets a specific timeout for the
+    /// connection to use. If not specified, the
+    /// timeout defaults to two seconds.
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
+    }
+
     /// Connects to the server and consumes the builder.
     pub async fn connect(self) -> Result<StatusConnection> {
         let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
@@ -141,6 +154,7 @@ impl ConnectionConfig {
             protocol_version: self.protocol_version,
             address: self.address,
             port: self.port,
+            timeout: self.timeout,
         })
     }
 }
@@ -158,6 +172,7 @@ pub struct StatusConnection {
     protocol_version: usize,
     address: String,
     port: u16,
+    timeout: Duration,
 }
 
 impl StatusConnection {
@@ -176,18 +191,18 @@ impl StatusConnection {
         );
 
         self.stream
-            .write_packet(handshake)
+            .write_packet_with_timeout(handshake, self.timeout.clone())
             .await
             .context("failed to write handshake packet")?;
 
         self.stream
-            .write_packet(protocol::RequestPacket::new())
+            .write_packet_with_timeout(protocol::RequestPacket::new(), self.timeout.clone())
             .await
             .context("failed to write request packet")?;
 
         let response: protocol::ResponsePacket = self
             .stream
-            .read_packet()
+            .read_packet_with_timeout(self.timeout.clone())
             .await
             .context("failed to read response packet")?;
 
@@ -200,6 +215,7 @@ impl StatusConnection {
             address: self.address,
             port: self.port,
             status,
+            timeout: self.timeout,
         })
     }
 }
@@ -213,6 +229,7 @@ pub struct PingConnection {
     protocol_version: usize,
     address: String,
     port: u16,
+    timeout: Duration,
     pub status: StatusResponse,
 }
 
@@ -227,13 +244,13 @@ impl PingConnection {
         let ping = protocol::PingPacket::new(payload);
 
         self.stream
-            .write_packet(ping)
+            .write_packet_with_timeout(ping, self.timeout.clone())
             .await
             .context("failed to write ping packet")?;
 
         let pong: protocol::PongPacket = self
             .stream
-            .read_packet()
+            .read_packet_with_timeout(self.timeout.clone())
             .await
             .context("failed to read pong packet")?;
 
