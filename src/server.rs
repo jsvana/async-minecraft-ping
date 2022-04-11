@@ -220,6 +220,7 @@ impl StatusConnection {
 ///
 /// Constructed by calling `status()` on
 /// a `StatusConnection` struct.
+#[allow(dead_code)]
 pub struct PingConnection {
     stream: TcpStream,
     protocol_version: usize,
