@@ -14,8 +14,8 @@ pub enum ServerError {
     #[error("error reading or writing data")]
     ProtocolError,
 
-    #[error("failed to connect to server")]
-    FailedToConnect,
+    #[error("failed to connect to server: {source}")]
+    FailedToConnect { source: std::io::Error },
 
     #[error("invalid JSON response: \"{0}\"")]
     InvalidJson(String),
@@ -144,9 +144,11 @@ impl ConnectionConfig {
 
     /// Connects to the server and consumes the builder.
     pub async fn connect(self) -> Result<StatusConnection, ServerError> {
-        let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
-            .await
-            .map_err(|_| ServerError::FailedToConnect)?;
+        let Ok(stream) = tokio::time::timeout(self.timeout, TcpStream::connect(format!("{}:{}", self.address, self.port))).await else {
+                return Err(ServerError::FailedToConnect { source: std::io::ErrorKind::TimedOut.into()});
+        };
+
+        let stream = stream.map_err(|e| ServerError::FailedToConnect { source: e })?;
 
         Ok(StatusConnection {
             stream,
