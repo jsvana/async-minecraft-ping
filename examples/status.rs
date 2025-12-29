@@ -13,6 +13,11 @@ struct Args {
     /// Port to connect to
     #[structopt(short = "p", long = "port")]
     port: Option<u16>,
+
+    /// Enable SRV record lookup (requires 'srv' feature)
+    #[cfg(feature = "srv")]
+    #[structopt(long = "srv")]
+    srv_lookup: bool,
 }
 
 #[tokio::main]
@@ -22,6 +27,10 @@ async fn main() -> Result<()> {
     let mut config = ConnectionConfig::build(args.address);
     if let Some(port) = args.port {
         config = config.with_port(port);
+    }
+    #[cfg(feature = "srv")]
+    if args.srv_lookup {
+        config = config.with_srv_lookup();
     }
 
     let connection = config.connect().await?;

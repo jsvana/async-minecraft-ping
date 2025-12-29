@@ -55,7 +55,7 @@ impl From<State> for usize {
 ///
 /// Typically, the flow looks like this:
 /// 1. Construct a specific packet (HandshakePacket
-///   for example).
+///    for example).
 /// 2. Write that packet's contents to a byte buffer.
 /// 3. Construct a RawPacket using that byte buffer.
 /// 4. Write the RawPacket to the socket.
@@ -134,7 +134,7 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWireWriteExt for W {
                 break;
             }
         }
-        self.write(&buffer[0..written]).await?;
+        self.write_all(&buffer[0..written]).await?;
 
         Ok(())
     }
@@ -262,7 +262,7 @@ impl<W: AsyncWrite + Unpin + Send + Sync> AsyncWriteRawPacket for W {
 
         let inner = buffer.into_inner();
         self.write_varint(inner.len()).await?;
-        self.write(&inner).await?;
+        self.write_all(&inner).await?;
         Ok(())
     }
 
@@ -348,6 +348,7 @@ impl PacketId for RequestPacket {
 /// server to a status check for
 /// ServerListPing.
 pub struct ResponsePacket {
+    #[allow(dead_code)]
     pub packet_id: usize,
     pub body: String,
 }
@@ -401,6 +402,7 @@ impl PacketId for PingPacket {
 }
 
 pub struct PongPacket {
+    #[allow(dead_code)]
     pub packet_id: usize,
     pub payload: u64,
 }
@@ -422,5 +424,153 @@ impl AsyncReadFromBuffer for PongPacket {
             packet_id: 0,
             payload,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Cursor;
+
+    #[tokio::test]
+    async fn test_varint_roundtrip() {
+        let test_cases = vec![
+            0usize, 1, 127, 128, 255, 256, 16383, 16384, 2097151, 2097152, 268435455,
+        ];
+
+        for value in test_cases {
+            let mut buffer = Cursor::new(Vec::new());
+            buffer.write_varint(value).await.unwrap();
+
+            let mut reader = Cursor::new(buffer.into_inner());
+            let result = reader.read_varint().await.unwrap();
+
+            assert_eq!(value, result, "Varint roundtrip failed for {}", value);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_varint_encoding() {
+        // Test specific known encodings
+        let cases = vec![
+            (0usize, vec![0x00]),
+            (1, vec![0x01]),
+            (127, vec![0x7f]),
+            (128, vec![0x80, 0x01]),
+            (255, vec![0xff, 0x01]),
+            (25565, vec![0xdd, 0xc7, 0x01]),
+            (2097151, vec![0xff, 0xff, 0x7f]),
+        ];
+
+        for (value, expected) in cases {
+            let mut buffer = Cursor::new(Vec::new());
+            buffer.write_varint(value).await.unwrap();
+            assert_eq!(
+                buffer.into_inner(),
+                expected,
+                "Varint encoding failed for {}",
+                value
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_string_roundtrip() {
+        let test_cases = vec![
+            "",
+            "hello",
+            "localhost",
+            "mc.example.com",
+            "こんにちは", // Unicode
+        ];
+
+        for s in test_cases {
+            let mut buffer = Cursor::new(Vec::new());
+            buffer.write_string(s).await.unwrap();
+
+            let mut reader = Cursor::new(buffer.into_inner());
+            let result = reader.read_string().await.unwrap();
+
+            assert_eq!(s, result, "String roundtrip failed for {:?}", s);
+        }
+    }
+
+    #[tokio::test]
+    async fn test_handshake_packet_serialization() {
+        let packet = HandshakePacket::new(578, "localhost".to_string(), 25565);
+        let buffer = packet.write_to_buffer().await.unwrap();
+
+        // Verify the buffer contains expected data
+        let mut reader = Cursor::new(buffer);
+
+        // Protocol version (578 as varint)
+        let protocol = reader.read_varint().await.unwrap();
+        assert_eq!(protocol, 578);
+
+        // Server address
+        let address = reader.read_string().await.unwrap();
+        assert_eq!(address, "localhost");
+
+        // Server port (big-endian u16)
+        let port = reader.read_u16().await.unwrap();
+        assert_eq!(port, 25565);
+
+        // Next state (1 for status)
+        let state = reader.read_varint().await.unwrap();
+        assert_eq!(state, 1);
+    }
+
+    #[tokio::test]
+    async fn test_request_packet_serialization() {
+        let packet = RequestPacket::new();
+        let buffer = packet.write_to_buffer().await.unwrap();
+
+        // Request packet has no data
+        assert!(buffer.is_empty());
+    }
+
+    #[tokio::test]
+    async fn test_ping_packet_serialization() {
+        let packet = PingPacket::new(12345678);
+        let buffer = packet.write_to_buffer().await.unwrap();
+
+        // Ping packet contains a u64 payload (8 bytes, big-endian)
+        assert_eq!(buffer.len(), 8);
+
+        let mut reader = Cursor::new(buffer);
+        let payload = reader.read_u64().await.unwrap();
+        assert_eq!(payload, 12345678);
+    }
+
+    #[tokio::test]
+    async fn test_response_packet_deserialization() {
+        // Create a buffer with a JSON string
+        let json = r#"{"version":{"name":"1.20.4","protocol":765}}"#;
+        let mut buffer = Cursor::new(Vec::new());
+        buffer.write_string(json).await.unwrap();
+
+        let packet = ResponsePacket::read_from_buffer(buffer.into_inner())
+            .await
+            .unwrap();
+        assert_eq!(packet.body, json);
+    }
+
+    #[tokio::test]
+    async fn test_pong_packet_deserialization() {
+        let payload: u64 = 987654321;
+        let buffer = payload.to_be_bytes().to_vec();
+
+        let packet = PongPacket::read_from_buffer(buffer).await.unwrap();
+        assert_eq!(packet.payload, payload);
+    }
+
+    #[tokio::test]
+    async fn test_invalid_varint() {
+        // A varint with more than 5 continuation bytes is invalid
+        let invalid = vec![0x80, 0x80, 0x80, 0x80, 0x80, 0x80];
+        let mut reader = Cursor::new(invalid);
+
+        let result = reader.read_varint().await;
+        assert!(matches!(result, Err(ProtocolError::InvalidVarInt)));
     }
 }

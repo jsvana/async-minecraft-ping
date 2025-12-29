@@ -17,6 +17,9 @@ pub enum ServerError {
     #[error("failed to connect to server")]
     FailedToConnect,
 
+    #[error("connection timed out")]
+    ConnectionTimedOut,
+
     #[error("invalid JSON response: \"{0}\"")]
     InvalidJson(String),
 
@@ -103,6 +106,8 @@ pub struct ConnectionConfig {
     address: String,
     port: u16,
     timeout: Duration,
+    #[cfg(feature = "srv")]
+    srv_lookup: bool,
 }
 
 impl ConnectionConfig {
@@ -114,6 +119,8 @@ impl ConnectionConfig {
             address: address.into(),
             port: DEFAULT_PORT,
             timeout: DEFAULT_TIMEOUT,
+            #[cfg(feature = "srv")]
+            srv_lookup: false,
         }
     }
 
@@ -142,19 +149,78 @@ impl ConnectionConfig {
         self
     }
 
+    /// Enables SRV record lookup for the connection.
+    ///
+    /// When enabled, the library will query DNS for an SRV record
+    /// at `_minecraft._tcp.<address>`. If found, the target host
+    /// and port from the SRV record will be used instead of the
+    /// configured address and port.
+    ///
+    /// This feature requires the `srv` feature to be enabled.
+    #[cfg(feature = "srv")]
+    pub fn with_srv_lookup(mut self) -> Self {
+        self.srv_lookup = true;
+        self
+    }
+
     /// Connects to the server and consumes the builder.
     pub async fn connect(self) -> Result<StatusConnection, ServerError> {
-        let stream = TcpStream::connect(format!("{}:{}", self.address, self.port))
-            .await
-            .map_err(|_| ServerError::FailedToConnect)?;
+        let (address, port) = self.resolve_address().await;
+
+        let stream = tokio::time::timeout(
+            self.timeout,
+            TcpStream::connect(format!("{}:{}", address, port)),
+        )
+        .await
+        .map_err(|_| ServerError::ConnectionTimedOut)?
+        .map_err(|_| ServerError::FailedToConnect)?;
 
         Ok(StatusConnection {
             stream,
             protocol_version: self.protocol_version,
-            address: self.address,
-            port: self.port,
+            address,
+            port,
             timeout: self.timeout,
         })
+    }
+
+    #[cfg(feature = "srv")]
+    async fn resolve_address(&self) -> (String, u16) {
+        if !self.srv_lookup {
+            return (self.address.clone(), self.port);
+        }
+
+        // Try to resolve SRV record, fall back to original address on any failure
+        match self.lookup_srv().await {
+            Some((host, port)) => (host, port),
+            None => (self.address.clone(), self.port),
+        }
+    }
+
+    #[cfg(not(feature = "srv"))]
+    async fn resolve_address(&self) -> (String, u16) {
+        (self.address.clone(), self.port)
+    }
+
+    #[cfg(feature = "srv")]
+    async fn lookup_srv(&self) -> Option<(String, u16)> {
+        use hickory_resolver::TokioAsyncResolver;
+
+        let resolver = TokioAsyncResolver::tokio_from_system_conf().ok()?;
+        let srv_name = format!("_minecraft._tcp.{}", self.address);
+
+        let lookup = tokio::time::timeout(self.timeout, resolver.srv_lookup(&srv_name))
+            .await
+            .ok()?
+            .ok()?;
+
+        let record = lookup.iter().next()?;
+        let target = record.target().to_string();
+        // Remove trailing dot from DNS name
+        let host = target.trim_end_matches('.').to_string();
+        let port = record.port();
+
+        Some((host, port))
     }
 }
 
@@ -190,17 +256,15 @@ impl StatusConnection {
         );
 
         self.stream
-            .write_packet_with_timeout(handshake, self.timeout.clone())
+            .write_packet_with_timeout(handshake, self.timeout)
             .await?;
 
         self.stream
-            .write_packet_with_timeout(protocol::RequestPacket::new(), self.timeout.clone())
+            .write_packet_with_timeout(protocol::RequestPacket::new(), self.timeout)
             .await?;
 
-        let response: protocol::ResponsePacket = self
-            .stream
-            .read_packet_with_timeout(self.timeout.clone())
-            .await?;
+        let response: protocol::ResponsePacket =
+            self.stream.read_packet_with_timeout(self.timeout).await?;
 
         let status: StatusResponse = serde_json::from_str(&response.body)
             .map_err(|_| ServerError::InvalidJson(response.body))?;
@@ -241,22 +305,124 @@ impl PingConnection {
         let ping = protocol::PingPacket::new(payload);
 
         self.stream
-            .write_packet_with_timeout(ping, self.timeout.clone())
+            .write_packet_with_timeout(ping, self.timeout)
             .await?;
 
-        let pong: protocol::PongPacket = self
-            .stream
-            .read_packet_with_timeout(self.timeout.clone())
-            .await?;
+        let pong: protocol::PongPacket = self.stream.read_packet_with_timeout(self.timeout).await?;
 
         if pong.payload != payload {
             return Err(ServerError::MismatchedPayload {
                 expected: payload,
                 actual: pong.payload,
-            }
-            .into());
+            });
         }
 
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_server_description_plain() {
+        let json = r#""A Minecraft Server""#;
+        let desc: ServerDescription = serde_json::from_str(json).unwrap();
+        assert!(matches!(desc, ServerDescription::Plain(s) if s == "A Minecraft Server"));
+    }
+
+    #[test]
+    fn test_server_description_object() {
+        let json = r#"{"text":"A Minecraft Server"}"#;
+        let desc: ServerDescription = serde_json::from_str(json).unwrap();
+        assert!(matches!(desc, ServerDescription::Object { text } if text == "A Minecraft Server"));
+    }
+
+    #[test]
+    fn test_status_response_minimal() {
+        let json = r#"{
+            "version": {"name": "1.20.4", "protocol": 765},
+            "players": {"max": 20, "online": 5},
+            "description": "Welcome to the server"
+        }"#;
+
+        let response: StatusResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.version.name, "1.20.4");
+        assert_eq!(response.version.protocol, 765);
+        assert_eq!(response.players.max, 20);
+        assert_eq!(response.players.online, 5);
+        assert!(response.players.sample.is_none());
+        assert!(response.favicon.is_none());
+    }
+
+    #[test]
+    fn test_status_response_with_players() {
+        let json = r#"{
+            "version": {"name": "1.20.4", "protocol": 765},
+            "players": {
+                "max": 20,
+                "online": 2,
+                "sample": [
+                    {"name": "Player1", "id": "uuid-1"},
+                    {"name": "Player2", "id": "uuid-2"}
+                ]
+            },
+            "description": {"text": "Welcome"}
+        }"#;
+
+        let response: StatusResponse = serde_json::from_str(json).unwrap();
+        let sample = response.players.sample.unwrap();
+        assert_eq!(sample.len(), 2);
+        assert_eq!(sample[0].name, "Player1");
+        assert_eq!(sample[1].name, "Player2");
+    }
+
+    #[test]
+    fn test_status_response_with_favicon() {
+        let json = r#"{
+            "version": {"name": "1.20.4", "protocol": 765},
+            "players": {"max": 20, "online": 0},
+            "description": "Test",
+            "favicon": "data:image/png;base64,iVBORw0KGgo="
+        }"#;
+
+        let response: StatusResponse = serde_json::from_str(json).unwrap();
+        assert!(response.favicon.is_some());
+        assert!(response.favicon.unwrap().starts_with("data:image/png"));
+    }
+
+    #[test]
+    fn test_connection_config_defaults() {
+        let config = ConnectionConfig::build("localhost");
+        assert_eq!(config.address, "localhost");
+        assert_eq!(config.port, DEFAULT_PORT);
+        assert_eq!(config.timeout, DEFAULT_TIMEOUT);
+        assert_eq!(config.protocol_version, LATEST_PROTOCOL_VERSION);
+    }
+
+    #[test]
+    fn test_connection_config_with_port() {
+        let config = ConnectionConfig::build("localhost").with_port(12345);
+        assert_eq!(config.port, 12345);
+    }
+
+    #[test]
+    fn test_connection_config_with_timeout() {
+        let config = ConnectionConfig::build("localhost").with_timeout(Duration::from_secs(10));
+        assert_eq!(config.timeout, Duration::from_secs(10));
+    }
+
+    #[test]
+    fn test_connection_config_with_protocol_version() {
+        let config = ConnectionConfig::build("localhost").with_protocol_version(47);
+        assert_eq!(config.protocol_version, 47);
+    }
+
+    #[cfg(feature = "srv")]
+    #[test]
+    fn test_connection_config_with_srv_lookup() {
+        let config = ConnectionConfig::build("localhost").with_srv_lookup();
+        assert!(config.srv_lookup);
     }
 }
